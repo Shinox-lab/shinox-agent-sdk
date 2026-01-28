@@ -1,6 +1,6 @@
 [project]
 name = "shinox-agent-sdk"
-version = "0.0.1"
+version = "0.1.0"
 description = "SDK for building agents in the Shinox decentralized mesh network"
 readme = "README.md"
 requires-python = ">=3.11"
