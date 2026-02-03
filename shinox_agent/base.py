@@ -23,7 +23,7 @@ except ImportError:
     AgentCard = Any  # type: ignore
 
 logger = logging.getLogger(__name__)
-
+logger.setLevel(os.getenv("SHINOX_AGENT_SDK_LOG_LEVEL", "INFO").upper())
 # Heartbeat configuration
 HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("AGENT_HEARTBEAT_INTERVAL", "10"))
 

@@ -3,9 +3,12 @@ Shinox Agent SDK - Worker Agent Class
 
 The ShinoxWorkerAgent provides a simple way to create task-executing agents
 with default wake-up logic and brain invocation.
+
+Supports semantic wake-up using vector similarity for intelligent message filtering.
 """
 
 import logging
+import os
 from typing import Optional, Any
 
 from .base import ShinoxAgent
@@ -18,6 +21,9 @@ except ImportError:
     AgentCard = Any  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+# Default semantic wake-up threshold
+DEFAULT_WAKE_THRESHOLD = float(os.getenv("SEMANTIC_WAKE_THRESHOLD", "0.65"))
 
 
 class ShinoxWorkerAgent(ShinoxAgent):
@@ -33,18 +39,21 @@ class ShinoxWorkerAgent(ShinoxAgent):
         agent = ShinoxWorkerAgent(
             agent_card=agent_card,
             brain=brain,
+            enable_semantic_wake=True,  # Enable semantic matching
         )
         app = agent.app
 
     The worker will:
     1. Join sessions when invited by Director
     2. Listen for messages where it's @mentioned or targeted
-    3. Invoke the brain and publish the result
+    3. Use semantic similarity for broadcast messages (if enabled)
+    4. Invoke the brain and publish the result
 
-    Wake-up triggers (agent responds when):
-    - target_agent_id matches this agent's ID
-    - @{agent_id} is mentioned in the message content
-    - Any custom trigger word is found in the message
+    Wake-up triggers (priority order):
+    1. Explicit targeting (target_agent_id, @mention)
+    2. TASK_ASSIGNMENT interaction type
+    3. Semantic similarity > threshold (for BROADCAST_QUERY)
+    4. Fallback to keyword triggers (if semantic disabled/unavailable)
     """
 
     def __init__(
@@ -53,6 +62,8 @@ class ShinoxWorkerAgent(ShinoxAgent):
         brain: Any,
         agent_url: Optional[str] = None,
         triggers: Optional[list[str]] = None,
+        enable_semantic_wake: bool = True,
+        wake_threshold: float = DEFAULT_WAKE_THRESHOLD,
     ):
         """
         Initialize a Worker Agent.
@@ -63,9 +74,15 @@ class ShinoxWorkerAgent(ShinoxAgent):
                    Expected signature: brain.ainvoke({"messages": [...]}, config={"configurable": {"thread_id": ...}})
             agent_url: URL where agent is accessible (for registry).
             triggers: Additional keywords that wake up the agent (case-insensitive).
+                      Used as fallback when semantic matching is unavailable.
+            enable_semantic_wake: Enable semantic similarity matching for wake-up decisions.
+            wake_threshold: Minimum similarity score to wake (0-1). Default: 0.65.
         """
         self.brain = brain
         self._custom_triggers = triggers or []
+        self._enable_semantic_wake = enable_semantic_wake
+        self._wake_threshold = wake_threshold
+        self._semantic_matcher = None
 
         # Initialize base with our default handler
         super().__init__(
@@ -74,6 +91,40 @@ class ShinoxWorkerAgent(ShinoxAgent):
             triggers=triggers,
             agent_url=agent_url,
         )
+
+        # Add semantic matcher initialization to startup
+        original_startup = self.app.on_startup
+        self.app.on_startup(self._init_semantic_matcher)
+
+    async def _init_semantic_matcher(self):
+        """Initialize semantic matcher after agent is registered."""
+        if not self._enable_semantic_wake:
+            logger.info(f"[{self.agent_id}] Semantic wake-up disabled")
+            return
+
+        try:
+            from .embeddings import SemanticMatcher
+            self._semantic_matcher = SemanticMatcher(
+                agent_id=self.agent_id,
+                registry_url=self.registry_url,
+                wake_threshold=self._wake_threshold,
+            )
+            await self._semantic_matcher.initialize()
+            logger.info(
+                f"[{self.agent_id}] Semantic matcher initialized "
+                f"(threshold: {self._wake_threshold})"
+            )
+        except ImportError:
+            logger.warning(
+                f"[{self.agent_id}] sentence-transformers not available. "
+                "Falling back to keyword matching. "
+                "Install with: pip install shinox-agent-sdk[semantic]"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[{self.agent_id}] Failed to initialize semantic matcher: {e}. "
+                "Falling back to keyword matching."
+            )
 
     async def _default_session_handler(self, msg: AgentMessage, agent: 'ShinoxWorkerAgent'):
         """Default handler with wake-up logic and brain invocation."""
@@ -94,23 +145,44 @@ class ShinoxWorkerAgent(ShinoxAgent):
                 return
 
         # --- Wake-up Logic ---
-        # Workers follow explicit assignment model:
-        # - Wait for TASK_ASSIGNMENT from orchestrator (squad-lead)
-        # - Or explicit targeting (@mention, target_agent_id)
-        # - Do NOT self-start on SESSION_BRIEFING - let squad-lead coordinate
+        # Priority order:
+        # 1. Explicit targeting (target_agent_id, @mention) - ALWAYS wake
+        # 2. TASK_ASSIGNMENT - ALWAYS wake
+        # 3. BROADCAST_QUERY - Use semantic matching
+        # 4. Fallback to keyword triggers (if semantic unavailable)
         should_wake = False
+        wake_reason = None
 
         # 1. ALWAYS wake if directly targeted by agent ID
         if headers.target_agent_id == my_id:
             should_wake = True
+            wake_reason = "direct_target"
 
         # 2. ALWAYS wake if @mentioned in content
         elif f"@{my_id}" in msg.content:
             should_wake = True
+            wake_reason = "mention"
 
         # 3. Wake on TASK_ASSIGNMENT (explicit work from orchestrator)
         elif interaction_type == "TASK_ASSIGNMENT":
             should_wake = True
+            wake_reason = "task_assignment"
+
+        # 4. Semantic matching for BROADCAST_QUERY (first capable agent responds)
+        elif interaction_type == "BROADCAST_QUERY":
+            if agent._semantic_matcher and agent._semantic_matcher.initialized:
+                wake, score, component = agent._semantic_matcher.should_wake(msg.content)
+                if wake:
+                    should_wake = True
+                    wake_reason = f"semantic:{component}(score={score:.2f})"
+            else:
+                # Fallback to keyword triggers for BROADCAST_QUERY
+                content_lower = msg.content.lower()
+                for trigger in agent._custom_triggers:
+                    if trigger.lower() in content_lower:
+                        should_wake = True
+                        wake_reason = f"keyword:{trigger}"
+                        break
 
         # NOTE: Workers do NOT wake on:
         # - SESSION_BRIEFING: Squad-lead handles briefings and creates assignments
@@ -122,7 +194,7 @@ class ShinoxWorkerAgent(ShinoxAgent):
             logger.debug(f"[{my_id}] Ignoring {interaction_type} from {headers.source_agent_id}")
             return
 
-        print(f"[{my_id}] Processing message from {headers.source_agent_id}")
+        print(f"[{my_id}] Processing message from {headers.source_agent_id} (reason: {wake_reason})")
 
         # --- Brain Invocation ---
         try:
