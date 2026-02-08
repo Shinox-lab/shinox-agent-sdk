@@ -31,9 +31,19 @@ Semantic Wake-up:
 
     The agent will use vector similarity matching to decide
     when to respond to broadcast messages based on its capabilities.
+
+Agent History Tool:
+    from shinox_agent.tools import AgentHistoryTool, get_session_history
+
+    # Fetch session history for context
+    history = await get_session_history(session_id, registry_url)
+
+    # Use as LangChain tool in agent brains
+    tool = AgentHistoryTool(registry_url=url, session_id=session_id)
 """
 
 from .base import ShinoxAgent
+from .logging import setup_json_logging
 from .worker import ShinoxWorkerAgent
 from .schemas import (
     AgentMessage,
@@ -42,6 +52,10 @@ from .schemas import (
     SystemCommandMetadata,
     InteractionType,
     GovernanceStatus,
+    GROUP_VISIBLE_TYPES,
+    OBSERVE_ONLY_TYPES,
+    ALWAYS_WAKE_TYPES,
+    COLLABORATION_RESPONSE_TYPES,
 )
 
 # Optional: Semantic matching (requires sentence-transformers)
@@ -51,12 +65,28 @@ except ImportError:
     SemanticMatcher = None
     SemanticMatcherFactory = None
 
-__version__ = "0.1.0"
+# Optional: Agent History Tool
+try:
+    from .tools import (
+        AgentHistoryTool,
+        get_session_history,
+        get_session_results,
+        should_auto_fetch_history,
+    )
+except ImportError:
+    AgentHistoryTool = None
+    get_session_history = None
+    get_session_results = None
+    should_auto_fetch_history = None
+
+__version__ = "0.1.1"
 
 __all__ = [
     # Agent classes
     "ShinoxAgent",
     "ShinoxWorkerAgent",
+    # Logging
+    "setup_json_logging",
     # Message schemas
     "AgentMessage",
     "A2AHeaders",
@@ -65,7 +95,17 @@ __all__ = [
     # Type aliases
     "InteractionType",
     "GovernanceStatus",
+    # Interaction type sets (for wake-up logic)
+    "GROUP_VISIBLE_TYPES",
+    "OBSERVE_ONLY_TYPES",
+    "ALWAYS_WAKE_TYPES",
+    "COLLABORATION_RESPONSE_TYPES",
     # Semantic matching (optional)
     "SemanticMatcher",
     "SemanticMatcherFactory",
+    # History Tool (optional)
+    "AgentHistoryTool",
+    "get_session_history",
+    "get_session_results",
+    "should_auto_fetch_history",
 ]

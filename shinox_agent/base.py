@@ -15,6 +15,7 @@ from faststream import FastStream
 from faststream.kafka import KafkaBroker
 
 from .schemas import AgentMessage, A2AHeaders, SystemCommand
+from .logging import setup_json_logging
 
 # Try to import AgentCard from a2a.types, fall back to Any
 try:
@@ -79,6 +80,9 @@ class ShinoxAgent:
             agent_url: URL where the agent is accessible (for registry).
                        Defaults to AGENT_URL env var or http://localhost:8001.
         """
+        # --- Structured Logging ---
+        setup_json_logging(agent_card.name)
+
         # --- Configuration ---
         self.broker_url = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:19092")
         self.registry_url = os.getenv("AGENT_REGISTRY_URL", "http://localhost:9000")
@@ -388,6 +392,7 @@ description: "{self.agent_card.description}"
         interaction_type: str,
         target_agent_id: Optional[str] = None,
         route_through_governance: bool = True,
+        metadata: Optional[dict] = None,
     ):
         """
         Publish a message to the mesh.
@@ -398,9 +403,11 @@ description: "{self.agent_card.description}"
             interaction_type: Type of interaction (TASK_RESULT, INFO_UPDATE, etc.)
             target_agent_id: Optional target agent
             route_through_governance: If True, send via mesh.responses.pending
+            metadata: Optional metadata dict (e.g., confidence scores, preferred_agents)
         """
         msg = AgentMessage(
             content=content,
+            metadata=metadata or {},
             headers=A2AHeaders(
                 source_agent_id=self.agent_id,
                 target_agent_id=target_agent_id,
