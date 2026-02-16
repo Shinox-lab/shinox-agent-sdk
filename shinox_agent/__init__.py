@@ -44,7 +44,7 @@ Agent History Tool:
 
 from .base import ShinoxAgent
 from .logging import setup_json_logging
-from .worker import ShinoxWorkerAgent
+from .worker import ShinoxWorkerAgent, BackgroundTask
 from .schemas import (
     AgentMessage,
     A2AHeaders,
@@ -79,12 +79,13 @@ except ImportError:
     get_session_results = None
     should_auto_fetch_history = None
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     # Agent classes
     "ShinoxAgent",
     "ShinoxWorkerAgent",
+    "BackgroundTask",
     # Logging
     "setup_json_logging",
     # Message schemas

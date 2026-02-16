@@ -64,6 +64,19 @@ class PendingCollaboration:
 
 
 @dataclass
+class BackgroundTask:
+    """Tracks an active background brain invocation."""
+    task_id: str
+    conversation_id: str
+    source_agent_id: str
+    original_message_id: str
+    interaction_type: str
+    started_at: float = field(default_factory=time.time)
+    status: str = "running"  # running | completed | failed
+    asyncio_task: Optional[asyncio.Task] = field(default=None, repr=False)
+
+
+@dataclass
 class ConversationContext:
     """Tracks conversation context for intelligent participation."""
     session_id: str
@@ -132,6 +145,8 @@ class ShinoxWorkerAgent(ShinoxAgent):
         enable_peer_collaboration: bool = False,
         collaboration_timeout: float = 60.0,
         collaboration_max_rounds: int = 3,
+        async_mode: bool = False,
+        max_concurrent_tasks: int = 10,
     ):
         """
         Initialize a Worker Agent.
@@ -153,6 +168,11 @@ class ShinoxWorkerAgent(ShinoxAgent):
                                        instead wait for peer responses. Default: False.
             collaboration_timeout: Seconds to wait for a peer response before falling back. Default: 60.
             collaboration_max_rounds: Max back-and-forth rounds with peers. Default: 3.
+            async_mode: Enable asynchronous task processing. When True, TASK_ASSIGNMENT and
+                        DIRECT_COMMAND are processed in background tasks. Default: False.
+                        Also reads ASYNC_MODE env var.
+            max_concurrent_tasks: Maximum number of concurrent background tasks. If exceeded,
+                                  falls back to synchronous processing. Default: 10.
         """
         self.brain = brain
         self._custom_triggers = triggers or []
@@ -170,6 +190,14 @@ class ShinoxWorkerAgent(ShinoxAgent):
         self._collaboration_timeout = collaboration_timeout
         self._collaboration_max_rounds = collaboration_max_rounds
 
+        # Async background processing settings (opt-in)
+        self._async_mode = (
+            async_mode
+            or os.getenv("ASYNC_MODE", "false").lower() == "true"
+        )
+        self._max_concurrent_tasks = max_concurrent_tasks
+        self._background_tasks: Dict[str, BackgroundTask] = {}
+
         # Conversation context tracking per session
         self._conversation_contexts: Dict[str, ConversationContext] = {}
 
@@ -184,6 +212,9 @@ class ShinoxWorkerAgent(ShinoxAgent):
         # Add semantic matcher initialization to startup
         original_startup = self.app.on_startup
         self.app.on_startup(self._init_semantic_matcher)
+
+        # Register shutdown hook for background tasks
+        self.app.on_shutdown(self._shutdown_background_tasks)
 
     def _get_or_create_context(self, session_id: str) -> ConversationContext:
         """Get or create conversation context for a session."""
@@ -404,6 +435,60 @@ class ShinoxWorkerAgent(ShinoxAgent):
             await agent._handle_peer_response(msg, headers, context)
             return
 
+        # --- Async Dispatch (fire-and-forget) ---
+        use_async = agent._async_mode or msg.metadata.get("async", False)
+        if use_async and interaction_type in ALWAYS_WAKE_TYPES:
+            running_count = sum(
+                1 for bt in agent._background_tasks.values() if bt.status == "running"
+            )
+            if running_count < agent._max_concurrent_tasks:
+                task_id = str(uuid.uuid4())
+
+                # Publish immediate acknowledgment
+                await agent.publish_message(
+                    content=f"Task received, processing asynchronously.",
+                    conversation_id=headers.conversation_id,
+                    interaction_type="INFO_UPDATE",
+                    target_agent_id=headers.source_agent_id,
+                    route_through_governance=False,
+                    metadata={
+                        "status": "async_processing",
+                        "task_id": task_id,
+                        "original_message_id": msg.id,
+                    },
+                )
+
+                # Create tracking entry
+                bg_task = BackgroundTask(
+                    task_id=task_id,
+                    conversation_id=headers.conversation_id,
+                    source_agent_id=headers.source_agent_id,
+                    original_message_id=msg.id,
+                    interaction_type=interaction_type,
+                )
+                agent._background_tasks[task_id] = bg_task
+
+                # Launch background task
+                bg_task.asyncio_task = asyncio.create_task(
+                    agent._run_brain_in_background(
+                        task_id=task_id,
+                        enhanced_content=enhanced_content,
+                        msg=msg,
+                        wake_reason=wake_reason,
+                    )
+                )
+
+                logger.info(
+                    f"[{my_id}] Dispatched async task {task_id[:8]} "
+                    f"({running_count + 1}/{agent._max_concurrent_tasks} concurrent)"
+                )
+                return  # Handler exits immediately (non-blocking)
+            else:
+                logger.warning(
+                    f"[{my_id}] Concurrency limit reached ({running_count}/{agent._max_concurrent_tasks}), "
+                    "falling back to synchronous processing"
+                )
+
         # --- Brain Invocation ---
         try:
             from langchain_core.messages import HumanMessage
@@ -521,6 +606,144 @@ class ShinoxWorkerAgent(ShinoxAgent):
                 conversation_id=headers.conversation_id,
                 target_agent_id=headers.source_agent_id,
             )
+
+    # --- Background Task Processing ---
+
+    async def _run_brain_in_background(
+        self,
+        task_id: str,
+        enhanced_content: str,
+        msg: AgentMessage,
+        wake_reason: str,
+    ):
+        """Execute brain invocation in a background task and publish result when done."""
+        my_id = self.agent_id
+        headers = msg.headers
+        interaction_type = headers.interaction_type
+
+        try:
+            from langchain_core.messages import HumanMessage
+
+            is_helping_peer = interaction_type == "PEER_REQUEST"
+            incoming_corr_id = msg.metadata.get("collaboration_correlation_id") if is_helping_peer else None
+
+            lc_msg = HumanMessage(content=enhanced_content, name=headers.source_agent_id)
+            state = {"messages": [lc_msg]}
+            config = {"configurable": {"thread_id": headers.conversation_id}}
+
+            result = await self.brain.ainvoke(state, config=config)
+            response_content = result["messages"][-1].content
+
+            # Self-awareness: assess response quality
+            response_confidence = None
+            response_needs_help = False
+            try:
+                from .stuck_detection import assess_response
+                assessment = assess_response(str(response_content))
+                response_confidence = assessment.confidence
+                response_needs_help = assessment.needs_help
+            except ImportError:
+                pass
+
+            # Publish TASK_RESULT with task_id correlation
+            metadata = {"task_id": task_id}
+            if response_confidence is not None:
+                metadata["confidence"] = response_confidence
+
+            await self.publish_message(
+                content=str(response_content),
+                conversation_id=headers.conversation_id,
+                interaction_type="TASK_RESULT",
+                target_agent_id=headers.source_agent_id,
+                route_through_governance=True,
+                metadata=metadata,
+            )
+
+            # Mark task as completed
+            if task_id in self._background_tasks:
+                self._background_tasks[task_id].status = "completed"
+
+            logger.info(
+                f"[{my_id}] Background task {task_id[:8]} completed "
+                f"(confidence={response_confidence})"
+            )
+
+        except asyncio.CancelledError:
+            if task_id in self._background_tasks:
+                self._background_tasks[task_id].status = "failed"
+            logger.info(f"[{my_id}] Background task {task_id[:8]} cancelled")
+            raise
+
+        except Exception as e:
+            logger.error(f"[{my_id}] Background task {task_id[:8]} failed: {e}")
+
+            # Publish error TASK_RESULT with task_id correlation
+            metadata = {"task_id": task_id, "status": "error", "error": str(e)}
+            await self.publish_message(
+                content=f"Error processing request: {str(e)}",
+                conversation_id=headers.conversation_id,
+                interaction_type="TASK_RESULT",
+                target_agent_id=headers.source_agent_id,
+                route_through_governance=True,
+                metadata=metadata,
+            )
+
+            if task_id in self._background_tasks:
+                self._background_tasks[task_id].status = "failed"
+
+        finally:
+            # Delayed cleanup: remove entry after 60s
+            await asyncio.sleep(60)
+            self._background_tasks.pop(task_id, None)
+
+    async def _shutdown_background_tasks(self):
+        """Cancel all running background tasks and wait for completion."""
+        my_id = self.agent_id
+        running = [
+            bt for bt in self._background_tasks.values()
+            if bt.asyncio_task and not bt.asyncio_task.done()
+        ]
+
+        if not running:
+            return
+
+        logger.info(f"[{my_id}] Cancelling {len(running)} background tasks...")
+
+        for bt in running:
+            bt.asyncio_task.cancel()
+            bt.status = "failed"
+
+        # Wait up to 10s for tasks to complete
+        tasks = [bt.asyncio_task for bt in running]
+        done, pending = await asyncio.wait(tasks, timeout=10.0)
+
+        for bt in running:
+            if bt.asyncio_task in pending:
+                logger.warning(
+                    f"[{my_id}] Background task {bt.task_id[:8]} did not finish within timeout"
+                )
+
+        logger.info(f"[{my_id}] Background tasks shutdown complete")
+
+    def get_background_tasks(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get status of all tracked background tasks.
+
+        Returns:
+            Dict mapping task_id to status info including:
+            status, conversation_id, source_agent_id, started_at, elapsed_seconds
+        """
+        result = {}
+        now = time.time()
+        for task_id, bt in self._background_tasks.items():
+            result[task_id] = {
+                "status": bt.status,
+                "conversation_id": bt.conversation_id,
+                "source_agent_id": bt.source_agent_id,
+                "started_at": bt.started_at,
+                "elapsed_seconds": round(now - bt.started_at, 2),
+            }
+        return result
 
     # --- Peer Collaboration Handlers ---
 
