@@ -282,6 +282,8 @@ description: "{self.agent_card.description}"
             logger.info(f"[{self.agent_id}] Subscribed to session: {session_id}")
         except Exception as e:
             logger.error(f"[{self.agent_id}] Failed to subscribe to {session_id}: {e}")
+            # Remove from active_sessions so we don't silently drop messages
+            self.active_sessions.discard(session_id)
 
     async def _session_message_handler(self, msg):
         """Handle messages from session topics."""
@@ -365,7 +367,12 @@ description: "{self.agent_card.description}"
         return default
 
     async def fetch_available_agents(self, exclude_self: bool = True) -> list[str]:
-        """Fetch all active agents from registry."""
+        """Fetch all active agents from registry.
+
+        Returns a list of strings in the format:
+            "agent-id: <description>. Skills: <skill1> - <desc1>; <skill2> - <desc2>"
+        so that coordinator agents have enough context for task routing.
+        """
         url = f"{self.registry_url}/discover?status=active"
         agents = []
 
@@ -374,16 +381,44 @@ description: "{self.agent_card.description}"
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     data = resp.json()
-                    for agent in data:
-                        aid = agent.get("agent_id")
+                    # /discover returns Dict[str, AgentInfo] — iterate values
+                    agent_list = data.values() if isinstance(data, dict) else data
+                    for agent in agent_list:
+                        aid = agent.get("agent_id", "")
                         if exclude_self and aid == self.agent_id:
                             continue
-                        desc = agent.get("card", {}).get("description", "No description")
-                        agents.append(f"{aid}: {desc}")
+                        # Description is a top-level field on AgentInfo
+                        desc = agent.get("description") or "No description"
+                        # Enrich with skill-level detail when available
+                        skills_summary = self._format_skills(agent.get("skills", []))
+                        entry = f"{aid}: {desc}"
+                        if skills_summary:
+                            entry += f". Skills: {skills_summary}"
+                        agents.append(entry)
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Agent discovery error: {e}")
 
         return agents
+
+    @staticmethod
+    def _format_skills(skills) -> str:
+        """Build a compact skill summary string from the skills field.
+
+        *skills* may be a list of skill names (from AgentInfo) or a list
+        of dicts / skill objects (if the registry evolves to return richer
+        data).  Handles both gracefully.
+        """
+        if not skills:
+            return ""
+        parts = []
+        for s in skills:
+            if isinstance(s, dict):
+                name = s.get("name", s.get("id", "unknown"))
+                sdesc = s.get("description", "")
+                parts.append(f"{name} — {sdesc}" if sdesc else name)
+            elif isinstance(s, str):
+                parts.append(s)
+        return "; ".join(parts)
 
     async def publish_message(
         self,

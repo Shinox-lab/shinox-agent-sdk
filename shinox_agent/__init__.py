@@ -79,7 +79,8 @@ except ImportError:
     get_session_results = None
     should_auto_fetch_history = None
 
-__version__ = "0.1.2"
+# DO not reference this __version__, please refer to the pyproject.toml for the source of truth on version number
+# __version__ = "0.1.2"
 
 __all__ = [
     # Agent classes
