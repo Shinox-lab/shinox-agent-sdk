@@ -97,6 +97,7 @@ class SystemCommandMetadata(BaseModel):
     priority: str = "NORMAL"
     session_title: Optional[str] = None
     session_briefing: Optional[str] = None
+    agent_context: Optional[str] = None
 
     class Config:
         extra = "allow"

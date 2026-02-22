@@ -430,6 +430,10 @@ class ShinoxWorkerAgent(ShinoxAgent):
             except Exception as e:
                 logger.warning(f"[{my_id}] Auto-history injection failed: {e}")
 
+        # --- Director-Injected Context (mesh awareness, honesty rules) ---
+        if agent.agent_context:
+            enhanced_content = f"{agent.agent_context}\n---\n\n{enhanced_content}"
+
         # --- Collaboration Re-Invocation (peer_response wake) ---
         if wake_reason and wake_reason.startswith("peer_response:"):
             await agent._handle_peer_response(msg, headers, context)
@@ -784,6 +788,10 @@ class ShinoxWorkerAgent(ShinoxAgent):
             f"{msg.content}\n\n"
             f"Please incorporate this information and provide an improved response."
         )
+
+        # Prepend director-injected context (mesh awareness, honesty rules)
+        if self.agent_context:
+            enriched_content = f"{self.agent_context}\n---\n\n{enriched_content}"
 
         try:
             from langchain_core.messages import HumanMessage

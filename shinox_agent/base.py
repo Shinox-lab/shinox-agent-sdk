@@ -92,6 +92,7 @@ class ShinoxAgent:
         self.active_sessions: set[str] = set()
         self.session_handler = session_handler
         self.triggers = triggers or []
+        self.agent_context: str = ""  # Injected by director on JOIN_SESSION
 
         # --- Identity ---
         self.agent_id = self._generate_agent_id()
@@ -255,6 +256,11 @@ description: "{self.agent_card.description}"
         if cmd.metadata.command == "JOIN_SESSION":
             session_id = cmd.metadata.session_id
             logger.info(f"[{self.agent_id}] JOIN_SESSION: {session_id}")
+
+            # Store director-injected context (mesh awareness, honesty rules)
+            if cmd.metadata.agent_context:
+                self.agent_context = cmd.metadata.agent_context
+                logger.info(f"[{self.agent_id}] Received agent context from director")
 
             if session_id not in self.active_sessions:
                 self.active_sessions.add(session_id)
