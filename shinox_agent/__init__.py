@@ -65,6 +65,12 @@ except ImportError:
     SemanticMatcher = None
     SemanticMatcherFactory = None
 
+# Optional: A2A Bridge (requires a2a-sdk)
+try:
+    from .a2a_bridge import A2ABridge
+except ImportError:
+    A2ABridge = None
+
 # Optional: Agent History Tool
 try:
     from .tools import (
@@ -105,6 +111,8 @@ __all__ = [
     # Semantic matching (optional)
     "SemanticMatcher",
     "SemanticMatcherFactory",
+    # A2A Bridge (optional)
+    "A2ABridge",
     # History Tool (optional)
     "AgentHistoryTool",
     "get_session_history",

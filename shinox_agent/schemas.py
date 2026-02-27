@@ -29,6 +29,9 @@ InteractionType = Literal[
     "PEER_RESPONSE",        # Response to a PEER_REQUEST → correlation-based wake-up
     "EXPERTISE_OFFER",      # Agent offers expertise → semantic wake-up
     "BROADCAST_QUERY",      # Legacy: general broadcast → semantic wake-up
+
+    # --- Session Continuity ---
+    "HITL_RESOLVED",        # Human resolved a HITL request via dashboard
 ]
 
 GovernanceStatus = Literal["PENDING", "VERIFIED", "BLOCKED"]
@@ -55,6 +58,7 @@ OBSERVE_ONLY_TYPES: Set[str] = {
 ALWAYS_WAKE_TYPES: Set[str] = {
     "DIRECT_COMMAND",
     "TASK_ASSIGNMENT",
+    "HITL_RESOLVED",
 }
 
 # Collaboration response types — targeted wake-up via correlation_id matching

@@ -392,43 +392,7 @@ class ShinoxWorkerAgent(ShinoxAgent):
 
         print(f"[{my_id}] Processing message from {headers.source_agent_id} (reason: {wake_reason})")
 
-        # --- Auto-History Injection ---
-        # Check if task needs history context and inject if needed
         enhanced_content = msg.content
-
-        if agent._enable_auto_history:
-            try:
-                from .tools.history import (
-                    should_auto_fetch_history,
-                    get_session_results,
-                    format_results_as_context,
-                )
-
-                needs_history, matched_patterns = should_auto_fetch_history(msg.content)
-
-                if needs_history:
-                    logger.info(
-                        f"[{my_id}] Auto-history triggered by patterns: {matched_patterns}"
-                    )
-
-                    # Fetch task results from session
-                    results = await get_session_results(
-                        session_id=headers.conversation_id,
-                        registry_url=agent.registry_url,
-                        limit=20,
-                    )
-
-                    if results:
-                        context_block = format_results_as_context(results)
-                        enhanced_content = f"{context_block}\n---\n\n**Your Task:** {msg.content}"
-                        logger.info(
-                            f"[{my_id}] Injected {len(results)} previous results as context"
-                        )
-
-            except ImportError:
-                logger.debug(f"[{my_id}] Auto-history tools not available")
-            except Exception as e:
-                logger.warning(f"[{my_id}] Auto-history injection failed: {e}")
 
         # --- Director-Injected Context (mesh awareness, honesty rules) ---
         if agent.agent_context:
@@ -529,6 +493,23 @@ class ShinoxWorkerAgent(ShinoxAgent):
                 logger.debug(f"[{my_id}] stuck_detection not available, skipping self-assessment")
 
             # --- Result Dispatch ---
+
+            # Case 0: Brain requested additional context → broadcast to session group chat
+            response_str = str(response_content)
+            if response_str.strip().startswith("CONTEXT_REQUEST:"):
+                context_description = response_str.strip().split("CONTEXT_REQUEST:", 1)[1].strip()
+                logger.info(
+                    f"[{my_id}] Brain requested context: {context_description[:100]}"
+                )
+                await agent.broadcast_query(
+                    question=(
+                        f"@squad-lead-agent I need additional context to complete my task.\n\n"
+                        f"**What I need:** {context_description}\n\n"
+                        f"**Original task:** {msg.content[:500]}"
+                    ),
+                    conversation_id=headers.conversation_id,
+                )
+                return
 
             # Case 1: We're a helper responding to a PEER_REQUEST → publish PEER_RESPONSE
             if is_helping_peer:
@@ -648,6 +629,26 @@ class ShinoxWorkerAgent(ShinoxAgent):
                 response_needs_help = assessment.needs_help
             except ImportError:
                 pass
+
+            # Check if brain requested additional context
+            response_str = str(response_content)
+            if response_str.strip().startswith("CONTEXT_REQUEST:"):
+                context_description = response_str.strip().split("CONTEXT_REQUEST:", 1)[1].strip()
+                logger.info(
+                    f"[{my_id}] Background task {task_id[:8]} requested context: "
+                    f"{context_description[:100]}"
+                )
+                await self.broadcast_query(
+                    question=(
+                        f"@squad-lead-agent I need additional context to complete my task.\n\n"
+                        f"**What I need:** {context_description}\n\n"
+                        f"**Original task:** {msg.content[:500]}"
+                    ),
+                    conversation_id=headers.conversation_id,
+                )
+                if task_id in self._background_tasks:
+                    self._background_tasks[task_id].status = "waiting_context"
+                return
 
             # Publish TASK_RESULT with task_id correlation
             metadata = {"task_id": task_id}
