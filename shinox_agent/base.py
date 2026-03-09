@@ -213,6 +213,9 @@ description: "{self.agent_card.description}"
                     resp = await client.post(url, params={"status": "active"}, timeout=5.0)
                     if resp.status_code == 200:
                         logger.debug(f"[{self.agent_id}] Heartbeat sent")
+                    elif resp.status_code == 404:
+                        logger.warning(f"[{self.agent_id}] Not registered, re-registering...")
+                        await self.register_with_registry()
                     else:
                         logger.warning(f"[{self.agent_id}] Heartbeat failed: {resp.status_code}")
 
