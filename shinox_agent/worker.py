@@ -209,12 +209,16 @@ class ShinoxWorkerAgent(ShinoxAgent):
             agent_url=agent_url,
         )
 
+        # Register A2A bridge hooks (must run before semantic matcher)
+        self.app.on_startup(self._init_a2a_bridge)
+
         # Add semantic matcher initialization to startup
         original_startup = self.app.on_startup
         self.app.on_startup(self._init_semantic_matcher)
 
-        # Register shutdown hook for background tasks
+        # Register shutdown hooks
         self.app.on_shutdown(self._shutdown_background_tasks)
+        self.app.on_shutdown(self._shutdown_a2a_bridge)
 
     def _get_or_create_context(self, session_id: str) -> ConversationContext:
         """Get or create conversation context for a session."""
@@ -273,6 +277,44 @@ class ShinoxWorkerAgent(ShinoxAgent):
                 f"[{self.agent_id}] Failed to initialize semantic matcher: {e}. "
                 "Falling back to keyword matching."
             )
+
+    async def _init_a2a_bridge(self):
+        """Auto-detect A2ABridge brain and fetch remote agent card."""
+        try:
+            from .a2a_bridge import A2ABridge
+        except ImportError:
+            return  # a2a-sdk not installed, not using bridge
+
+        if not isinstance(self.brain, A2ABridge):
+            return  # brain is a local LangGraph runnable, nothing to do
+
+        try:
+            remote_card = await self.brain.fetch_agent_card()
+            if remote_card:
+                # Merge remote card fields into local agent_card
+                self.agent_card.skills = remote_card.skills
+                self.agent_card.description = remote_card.description
+                # Preserve local name (Kafka identity) — don't override
+                logger.info(
+                    f"[{self.agent_id}] A2A bridge connected to {self.brain.agent_url}, "
+                    f"synced {len(remote_card.skills)} skills from remote agent"
+                )
+        except Exception as e:
+            logger.warning(
+                f"[{self.agent_id}] Failed to fetch remote agent card from "
+                f"{self.brain.agent_url}: {e}. Using local agent_card."
+            )
+
+    async def _shutdown_a2a_bridge(self):
+        """Close A2ABridge client if brain is a bridge."""
+        try:
+            from .a2a_bridge import A2ABridge
+        except ImportError:
+            return
+
+        if isinstance(self.brain, A2ABridge):
+            await self.brain.close()
+            logger.info(f"[{self.agent_id}] A2A bridge closed")
 
     async def _default_session_handler(self, msg: AgentMessage, agent: 'ShinoxWorkerAgent'):
         """Default handler with wake-up logic and brain invocation."""
