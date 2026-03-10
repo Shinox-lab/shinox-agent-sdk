@@ -94,19 +94,39 @@ class ConversationContext:
     pending_collaborations: Dict[str, 'PendingCollaboration'] = field(default_factory=dict)
 
 
+@dataclass
+class _StubAgentCard:
+    """Minimal agent card stub — used when only ``name`` is provided."""
+    name: str
+    description: str = ""
+    url: str = ""
+    version: str = "1.0.0"
+    skills: list = field(default_factory=list)
+
+    def model_dump(self, **kwargs):
+        return {
+            "name": self.name,
+            "description": self.description,
+            "url": self.url,
+            "version": self.version,
+            "skills": [
+                s.model_dump(**kwargs) if hasattr(s, "model_dump") else s
+                for s in self.skills
+            ],
+        }
+
+
 class ShinoxWorkerAgent(ShinoxAgent):
     """
     Worker agent with default wake-up logic and simple brain invocation.
 
     This is the simplest way to create a task-executing agent:
 
-        from shinox_agent import ShinoxWorkerAgent
-        from brain import brain
-        from agent import agent_card
+        from shinox_agent import ShinoxWorkerAgent, A2ABridge
 
         agent = ShinoxWorkerAgent(
-            agent_card=agent_card,
-            brain=my_brain,
+            name="My Agent",
+            brain=A2ABridge("http://localhost:10002"),
             enable_semantic_wake=True,  # Enable semantic matching
             enable_auto_history=True,   # Auto-inject context when needed
         )
@@ -134,8 +154,8 @@ class ShinoxWorkerAgent(ShinoxAgent):
 
     def __init__(
         self,
-        agent_card: AgentCard,
-        brain: Any,
+        agent_card: AgentCard = None,
+        brain: Any = None,
         agent_url: Optional[str] = None,
         triggers: Optional[list[str]] = None,
         enable_semantic_wake: bool = True,
@@ -147,12 +167,14 @@ class ShinoxWorkerAgent(ShinoxAgent):
         collaboration_max_rounds: int = 3,
         async_mode: bool = False,
         max_concurrent_tasks: int = 10,
+        name: Optional[str] = None,
     ):
         """
         Initialize a Worker Agent.
 
         Args:
             agent_card: A2A AgentCard defining the agent's identity and capabilities.
+                        Optional if ``name`` is provided instead.
             brain: LangGraph/LangChain brain with ainvoke(state, config) method.
                    Expected signature: brain.ainvoke({"messages": [...]}, config={"configurable": {"thread_id": ...}})
             agent_url: URL where agent is accessible (for registry).
@@ -173,7 +195,19 @@ class ShinoxWorkerAgent(ShinoxAgent):
                         Also reads ASYNC_MODE env var.
             max_concurrent_tasks: Maximum number of concurrent background tasks. If exceeded,
                                   falls back to synchronous processing. Default: 10.
+            name: Agent name string. Alternative to passing a full ``agent_card``.
+                  When provided (without ``agent_card``), a lightweight stub card is
+                  created automatically. Skills and description are synced from the
+                  remote agent at startup if using A2ABridge.
         """
+        if agent_card is None:
+            if name is None:
+                raise ValueError("Either 'agent_card' or 'name' must be provided")
+            agent_card = _StubAgentCard(name=name)
+
+        if brain is None:
+            raise ValueError("'brain' is required")
+
         self.brain = brain
         self._custom_triggers = triggers or []
         self._enable_semantic_wake = enable_semantic_wake
@@ -295,6 +329,11 @@ class ShinoxWorkerAgent(ShinoxAgent):
                 self.agent_card.skills = remote_card.skills
                 self.agent_card.description = remote_card.description
                 # Preserve local name (Kafka identity) — don't override
+
+                # Refresh derived state now that skills/description are populated
+                self.self_introduction = self._generate_introduction()
+                await self.register_with_registry()
+
                 logger.info(
                     f"[{self.agent_id}] A2A bridge connected to {self.brain.agent_url}, "
                     f"synced {len(remote_card.skills)} skills from remote agent"

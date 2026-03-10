@@ -3,10 +3,14 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
   workflow_dispatch:
     inputs:
       publish_to_pypi:
-        description: 'Publish to PyPI'
+        description: "Publish to PyPI"
         required: false
         type: boolean
         default: true
@@ -15,83 +19,134 @@ permissions:
   contents: read
 
 jobs:
+  check-version-bump:
+    name: Check if version changed
+    runs-on: ubuntu-latest
+    # Only run on push events (not release or manual dispatch)
+    if: github.event_name == 'push'
+    outputs:
+      version_changed: ${{ steps.check.outputs.version_changed }}
+      new_version: ${{ steps.check.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check version change in pyproject.toml
+        id: check
+        run: |
+          # Get the version from the current commit
+          NEW_VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+
+          # Get the version from the previous commit
+          git show HEAD~1:pyproject.toml > /tmp/old_pyproject.toml 2>/dev/null || true
+          OLD_VERSION=$(grep '^version' /tmp/old_pyproject.toml | head -1 | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || echo "")
+
+          echo "Old version: $OLD_VERSION"
+          echo "New version: $NEW_VERSION"
+
+          if [ "$NEW_VERSION" != "$OLD_VERSION" ] && [ -n "$NEW_VERSION" ]; then
+            echo "version_changed=true" >> $GITHUB_OUTPUT
+            echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+            echo "Version changed: $OLD_VERSION → $NEW_VERSION"
+          else
+            echo "version_changed=false" >> $GITHUB_OUTPUT
+            echo "No version change detected."
+          fi
+
   build:
     name: Build distribution
     runs-on: ubuntu-latest
-
+    needs: [check-version-bump]
+    # Run if: manual/release trigger, OR version changed on push
+    if: |
+      always() &&
+      (
+        github.event_name == 'release' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'push' && needs.check-version-bump.outputs.version_changed == 'true')
+      )
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.12"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-    - name: Install build dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install build twine
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
 
-    - name: Build package
-      run: python -m build
+      - name: Build package
+        run: python -m build
 
-    - name: Check distribution
-      run: twine check dist/*
+      - name: Check distribution
+        run: twine check dist/*
 
-    - name: Store the distribution packages
-      uses: actions/upload-artifact@v4
-      with:
-        name: python-package-distributions
-        path: dist/
+      - name: Store the distribution packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
 
   publish-to-pypi:
     name: Publish to PyPI
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish_to_pypi)
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (
+        github.event_name == 'release' ||
+        (github.event_name == 'workflow_dispatch' && inputs.publish_to_pypi) ||
+        (github.event_name == 'push' && needs.check-version-bump.outputs.version_changed == 'true')
+      )
     needs:
-    - build
+      - build
+      - check-version-bump
     runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/p/shinox-agent-sdk
     permissions:
-      id-token: write  # IMPORTANT: mandatory for trusted publishing
+      id-token: write # IMPORTANT: mandatory for trusted publishing
 
     steps:
-    - name: Download all the dists
-      uses: actions/download-artifact@v4
-      with:
-        name: python-package-distributions
-        path: dist/
+      - name: Download all the dists
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
 
-    - name: Publish distribution to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        # Using trusted publishing (no token needed)
-        # Configure this at: https://pypi.org/manage/account/publishing/
-        verbose: true
+      - name: Publish distribution to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Using trusted publishing (no token needed)
+          # Configure this at: https://pypi.org/manage/account/publishing/
+          verbose: true
 
   publish-to-testpypi:
     name: Publish to TestPyPI
     if: github.event_name == 'workflow_dispatch' && !inputs.publish_to_pypi
     needs:
-    - build
+      - build
     runs-on: ubuntu-latest
     environment:
       name: testpypi
       url: https://test.pypi.org/p/shinox-agent-sdk
 
     permissions:
-      id-token: write  # IMPORTANT: mandatory for trusted publishing
+      id-token: write # IMPORTANT: mandatory for trusted publishing
 
     steps:
-    - name: Download all the dists
-      uses: actions/download-artifact@v4
-      with:
-        name: python-package-distributions
-        path: dist/
+      - name: Download all the dists
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
 
-    - name: Publish distribution to TestPyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        repository-url: https://test.pypi.org/legacy/
-        verbose: true
+      - name: Publish distribution to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          verbose: true
